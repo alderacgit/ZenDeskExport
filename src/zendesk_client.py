@@ -284,15 +284,17 @@ class ZendeskClient:
         self, 
         query: str,
         sort_by: str = "created_at",
-        sort_order: str = "desc"
+        sort_order: str = "desc",
+        max_results: int = 1000
     ) -> List[Dict[str, Any]]:
         """
-        Search for tickets using Zendesk Search API
+        Search for tickets using Zendesk Search API with pagination limits handling
         
         Args:
             query: Search query string
             sort_by: Field to sort by
             sort_order: Sort order (asc or desc)
+            max_results: Maximum number of results to return (default 1000)
             
         Returns:
             List of ticket dictionaries
@@ -304,4 +306,16 @@ class ZendeskClient:
             'sort_order': sort_order
         }
         
-        return self.get_paginated(url, params)
+        # Calculate max pages based on page size and max results
+        max_pages = min(10, (max_results + self.config.page_size - 1) // self.config.page_size)
+        
+        try:
+            return self.get_paginated(url, params, max_pages=max_pages)
+        except ZendeskAPIError as e:
+            if "Search Response Limits" in str(e):
+                logger.warning("Hit Zendesk search response limits, trying with fewer pages")
+                # Retry with fewer pages
+                max_pages = max(1, max_pages // 2)
+                return self.get_paginated(url, params, max_pages=max_pages)
+            else:
+                raise

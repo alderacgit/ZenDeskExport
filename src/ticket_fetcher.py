@@ -77,8 +77,20 @@ class TicketFetcher:
         
         console.print(f"[cyan]Searching for tickets with query: {query}[/cyan]")
         
-        # Fetch tickets
-        tickets = self.client.search_tickets(query)
+        # Try to fetch tickets
+        try:
+            tickets = self.client.search_tickets(query, max_results=1000)
+        except Exception as e:
+            if "Search Response Limits" in str(e):
+                console.print("[yellow]Large dataset detected. Fetching tickets in batches...[/yellow]")
+                tickets = self._fetch_tickets_in_date_chunks(group_id, status, created_after, created_before)
+            else:
+                raise
+        
+        # If we got exactly 1000 results, there might be more
+        if len(tickets) == 1000:
+            console.print("[yellow]Reached result limit. Fetching additional tickets in date chunks...[/yellow]")
+            tickets = self._fetch_tickets_in_date_chunks(group_id, status, created_after, created_before)
         
         console.print(f"[green]Found {len(tickets)} tickets in group {group_id}[/green]")
         
@@ -125,6 +137,90 @@ class TicketFetcher:
             tickets = self.fetch_tickets_by_group(group_id, status=status, use_cache=use_cache)
             if tickets:
                 all_tickets[group_id] = tickets
+        
+        return all_tickets
+    
+    def _fetch_tickets_in_date_chunks(
+        self,
+        group_id: str,
+        status: Optional[str] = None,
+        created_after: Optional[datetime] = None,
+        created_before: Optional[datetime] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Fetch tickets in date-based chunks to avoid search limits
+        
+        Args:
+            group_id: Group ID to fetch tickets from
+            status: Ticket status filter
+            created_after: Only fetch tickets created after this date
+            created_before: Only fetch tickets created before this date
+            
+        Returns:
+            List of all tickets across all date chunks
+        """
+        all_tickets = []
+        ticket_ids_seen = set()
+        
+        # Set date range - if not specified, use reasonable defaults
+        if not created_before:
+            created_before = datetime.now()
+        
+        if not created_after:
+            # Default to last 2 years if not specified
+            created_after = created_before - timedelta(days=730)
+        
+        # Calculate chunk size (30 days initially)
+        chunk_days = 30
+        current_start = created_after
+        
+        console.print(f"[cyan]Fetching tickets from {created_after.strftime('%Y-%m-%d')} to {created_before.strftime('%Y-%m-%d')} in chunks...[/cyan]")
+        
+        while current_start < created_before:
+            current_end = min(current_start + timedelta(days=chunk_days), created_before)
+            
+            # Build query for this chunk
+            query_parts = [f"group_id:{group_id}"]
+            
+            if status:
+                query_parts.append(f"status:{status}")
+            
+            query_parts.append(f"created>={current_start.strftime('%Y-%m-%d')}")
+            query_parts.append(f"created<{current_end.strftime('%Y-%m-%d')}")
+            
+            query = " ".join(query_parts)
+            
+            try:
+                console.print(f"[cyan]Fetching tickets from {current_start.strftime('%Y-%m-%d')} to {current_end.strftime('%Y-%m-%d')}...[/cyan]")
+                chunk_tickets = self.client.search_tickets(query, max_results=1000)
+                
+                # Deduplicate tickets based on ID
+                for ticket in chunk_tickets:
+                    ticket_id = ticket.get('id')
+                    if ticket_id and ticket_id not in ticket_ids_seen:
+                        ticket_ids_seen.add(ticket_id)
+                        all_tickets.append(ticket)
+                
+                console.print(f"[green]Found {len(chunk_tickets)} tickets in this chunk (total: {len(all_tickets)})[/green]")
+                
+                # If we hit the limit, reduce chunk size for next iteration
+                if len(chunk_tickets) >= 950:
+                    chunk_days = max(7, chunk_days // 2)
+                    console.print(f"[yellow]Reducing chunk size to {chunk_days} days[/yellow]")
+                
+            except Exception as e:
+                logger.error(f"Error fetching chunk {current_start} to {current_end}: {e}")
+                # Try smaller chunk on error
+                if chunk_days > 7:
+                    chunk_days = max(7, chunk_days // 2)
+                    console.print(f"[yellow]Error occurred, reducing chunk size to {chunk_days} days and retrying[/yellow]")
+                    continue
+                else:
+                    # If already at minimum chunk size, skip this chunk
+                    console.print(f"[red]Failed to fetch tickets for period {current_start.strftime('%Y-%m-%d')} to {current_end.strftime('%Y-%m-%d')}[/red]")
+            
+            # Move to next chunk
+            current_start = current_end
         
         return all_tickets
     
